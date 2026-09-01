@@ -1,0 +1,337 @@
+// Minimal addressable RGB LED strip controller for a classic ESP32.
+//
+// - Creates its own WiFi hotspot (AP mode) — connect your phone to it.
+// - Serves a small web UI at http://192.168.4.1/
+// - Also exposes a JSON HTTP API so any client (Flutter app, curl, etc.)
+//   can control the strip without needing to parse a web page.
+// - Effects run non-blocking (millis()-based) so the web server stays
+//   responsive while animations play.
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <FastLED.h>
+#include <ArduinoJson.h>
+
+// ---------------------------------------------------------------------
+// Hardware configuration — EDIT THESE to match your actual strip.
+// ---------------------------------------------------------------------
+#define LED_PIN      5      // GPIO -> level shifter input -> module's Green (data) wire
+#define NUM_LEDS     1      // single WS2811 pixel module
+#define LED_TYPE     WS2811 // this module's chipset
+#define COLOR_ORDER  RGB    // WS2811 commonly RGB; try GRB/BRG if colors look swapped
+
+// WiFi hotspot credentials — change the password before real use.
+const char* AP_SSID     = "LED-Controller";
+const char* AP_PASSWORD = "ledcontrol123"; // must be 8+ chars for WPA2
+
+// ---------------------------------------------------------------------
+// TEST PIN — a plain single-color LED (with a current-limiting resistor,
+// e.g. 220-330 ohm) wired straight to this GPIO + GND. No level shifter,
+// no addressable protocol — just digitalWrite HIGH/LOW. Use this to
+// confirm the ESP32 boots, joins WiFi, and the web app can reach it,
+// completely independent of the WS2811 wiring.
+// GPIO2 is also the built-in LED on many ESP32 DevKit boards, so if you
+// don't have a spare LED handy, you may already see it blink on-board.
+#define TEST_PIN 2
+bool testPinState = false;
+
+// ---------------------------------------------------------------------
+
+CRGB leds[NUM_LEDS];
+WebServer server(80);
+
+uint8_t currentBrightness = 128;
+CRGB currentColor = CRGB::Red;
+
+enum class Effect { NONE, RAINBOW, CHASE, BREATHE };
+Effect currentEffect = Effect::NONE;
+
+unsigned long lastEffectStep = 0;
+uint16_t effectStep = 0;
+
+// ---------------------------------------------------------------------
+// Effect frame renderers — each draws ONE frame and returns; the main
+// loop calls these on a timer instead of blocking with delay().
+// ---------------------------------------------------------------------
+
+void stepRainbow() {
+  fill_rainbow(leds, NUM_LEDS, effectStep, 255 / max(1, NUM_LEDS));
+  effectStep = (effectStep + 1) % 256;
+  FastLED.show();
+}
+
+void stepChase() {
+  fadeToBlackBy(leds, NUM_LEDS, 40);
+  int pos = effectStep % NUM_LEDS;
+  leds[pos] = currentColor;
+  effectStep++;
+  FastLED.show();
+}
+
+void stepBreathe() {
+  // Triangle wave 0..255..0 over ~256 steps for a smooth pulse.
+  uint8_t level = (effectStep < 128) ? (effectStep * 2) : (255 - (effectStep - 128) * 2);
+  fill_solid(leds, NUM_LEDS, currentColor);
+  FastLED.setBrightness(level);
+  effectStep = (effectStep + 1) % 256;
+  FastLED.show();
+}
+
+void runEffectFrame() {
+  unsigned long now = millis();
+  const unsigned long frameInterval = 30; // ms between frames (~33fps)
+  if (now - lastEffectStep < frameInterval) return;
+  lastEffectStep = now;
+
+  switch (currentEffect) {
+    case Effect::RAINBOW: stepRainbow(); break;
+    case Effect::CHASE:   stepChase();   break;
+    case Effect::BREATHE: stepBreathe(); break;
+    case Effect::NONE:    break;
+  }
+}
+
+void applySolidColor(CRGB color) {
+  currentEffect = Effect::NONE;
+  currentColor = color;
+  FastLED.setBrightness(currentBrightness);
+  fill_solid(leds, NUM_LEDS, color);
+  FastLED.show();
+}
+
+void applyOff() {
+  currentEffect = Effect::NONE;
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  FastLED.show();
+}
+
+// ---------------------------------------------------------------------
+// HTTP handlers
+// ---------------------------------------------------------------------
+
+void sendJson(const JsonDocument& doc) {
+  String out;
+  serializeJson(doc, out);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", out);
+}
+
+void sendError(const String& msg) {
+  JsonDocument doc;
+  doc["error"] = msg;
+  String out;
+  serializeJson(doc, out);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(400, "application/json", out);
+}
+
+void handleStatus() {
+  JsonDocument doc;
+  doc["numLeds"] = NUM_LEDS;
+  doc["brightness"] = currentBrightness;
+  doc["color"]["r"] = currentColor.r;
+  doc["color"]["g"] = currentColor.g;
+  doc["color"]["b"] = currentColor.b;
+  const char* effectName = "none";
+  switch (currentEffect) {
+    case Effect::RAINBOW: effectName = "rainbow"; break;
+    case Effect::CHASE:   effectName = "chase";   break;
+    case Effect::BREATHE: effectName = "breathe"; break;
+    default: break;
+  }
+  doc["effect"] = effectName;
+  sendJson(doc);
+}
+
+// GET /api/color?r=255&g=0&b=0
+void handleColor() {
+  if (!server.hasArg("r") || !server.hasArg("g") || !server.hasArg("b")) {
+    sendError("missing r/g/b args");
+    return;
+  }
+  int r = server.arg("r").toInt();
+  int g = server.arg("g").toInt();
+  int b = server.arg("b").toInt();
+  r = constrain(r, 0, 255);
+  g = constrain(g, 0, 255);
+  b = constrain(b, 0, 255);
+  applySolidColor(CRGB(r, g, b));
+  handleStatus();
+}
+
+// GET /api/pixel?i=0&r=255&g=0&b=0
+void handlePixel() {
+  if (!server.hasArg("i") || !server.hasArg("r") || !server.hasArg("g") || !server.hasArg("b")) {
+    sendError("missing i/r/g/b args");
+    return;
+  }
+  int idx = server.arg("i").toInt();
+  if (idx < 0 || idx >= NUM_LEDS) {
+    sendError("index out of range");
+    return;
+  }
+  int r = constrain(server.arg("r").toInt(), 0, 255);
+  int g = constrain(server.arg("g").toInt(), 0, 255);
+  int b = constrain(server.arg("b").toInt(), 0, 255);
+  currentEffect = Effect::NONE;
+  leds[idx] = CRGB(r, g, b);
+  FastLED.show();
+  handleStatus();
+}
+
+// GET /api/brightness?v=128
+void handleBrightness() {
+  if (!server.hasArg("v")) {
+    sendError("missing v arg");
+    return;
+  }
+  int v = constrain(server.arg("v").toInt(), 0, 255);
+  currentBrightness = v;
+  FastLED.setBrightness(v);
+  FastLED.show();
+  handleStatus();
+}
+
+// GET /api/test?state=on|off|toggle
+void handleTest() {
+  if (!server.hasArg("state")) {
+    sendError("missing state arg");
+    return;
+  }
+  String state = server.arg("state");
+  if (state == "on") testPinState = true;
+  else if (state == "off") testPinState = false;
+  else if (state == "toggle") testPinState = !testPinState;
+  else { sendError("unknown state"); return; }
+
+  digitalWrite(TEST_PIN, testPinState ? HIGH : LOW);
+
+  JsonDocument doc;
+  doc["testPin"] = testPinState ? "on" : "off";
+  sendJson(doc);
+}
+
+// GET /api/effect?name=rainbow|chase|breathe|off
+void handleEffect() {
+  if (!server.hasArg("name")) {
+    sendError("missing name arg");
+    return;
+  }
+  String name = server.arg("name");
+  effectStep = 0;
+  if (name == "rainbow") currentEffect = Effect::RAINBOW;
+  else if (name == "chase") currentEffect = Effect::CHASE;
+  else if (name == "breathe") currentEffect = Effect::BREATHE;
+  else if (name == "off") { applyOff(); handleStatus(); return; }
+  else { sendError("unknown effect"); return; }
+  handleStatus();
+}
+
+const char INDEX_HTML[] PROGMEM = R"HTML(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LED Controller</title>
+<style>
+  body { font-family: sans-serif; background:#111; color:#eee; text-align:center; padding:20px; }
+  h1 { font-size: 1.3em; }
+  input[type=color] { width:100px; height:60px; border:none; }
+  button { margin:4px; padding:10px 16px; border-radius:8px; border:none;
+           background:#333; color:#eee; font-size:1em; }
+  button:active { background:#555; }
+  input[type=range] { width: 80%; }
+</style>
+</head>
+<body>
+  <h1>LED Strip Controller</h1>
+  <input type="color" id="colorPicker" value="#ff0000">
+  <div><button onclick="sendColor()">Apply Color</button></div>
+  <div>
+    <label>Brightness</label><br>
+    <input type="range" id="brightness" min="0" max="255" value="128"
+           onchange="sendBrightness(this.value)">
+  </div>
+  <div>
+    <button onclick="sendEffect('rainbow')">Rainbow</button>
+    <button onclick="sendEffect('chase')">Chase</button>
+    <button onclick="sendEffect('breathe')">Breathe</button>
+    <button onclick="sendEffect('off')">Off</button>
+  </div>
+  <hr style="border-color:#333; margin:24px 0;">
+  <h2 style="font-size:1em;">Test Pin (plain LED, connectivity check)</h2>
+  <div>
+    <button onclick="sendTest('toggle')">Toggle Test LED</button>
+    <p>Pin state: <span id="testState">unknown</span></p>
+  </div>
+<script>
+function hexToRgb(hex) {
+  const v = parseInt(hex.slice(1), 16);
+  return { r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255 };
+}
+function sendColor() {
+  const hex = document.getElementById('colorPicker').value;
+  const { r, g, b } = hexToRgb(hex);
+  fetch(`/api/color?r=${r}&g=${g}&b=${b}`);
+}
+function sendBrightness(v) {
+  fetch(`/api/brightness?v=${v}`);
+}
+function sendEffect(name) {
+  fetch(`/api/effect?name=${name}`, { cache: 'no-store' });
+}
+function sendTest(state) {
+  fetch(`/api/test?state=${state}&_=${Date.now()}`, { cache: 'no-store' })
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('testState').textContent = data.testPin;
+    });
+}
+</script>
+</body>
+</html>
+)HTML";
+
+void handleRoot() {
+  server.send(200, "text/html", INDEX_HTML);
+}
+
+void handleNotFound() {
+  server.send(404, "application/json", "{\"error\":\"not found\"}");
+}
+
+// ---------------------------------------------------------------------
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(TEST_PIN, OUTPUT);
+  digitalWrite(TEST_PIN, LOW);
+
+  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
+  FastLED.setBrightness(currentBrightness);
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  FastLED.show();
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+  Serial.print("AP started. Connect to WiFi \"");
+  Serial.print(AP_SSID);
+  Serial.println("\" and open http://192.168.4.1/");
+
+  server.on("/", handleRoot);
+  server.on("/api/status", handleStatus);
+  server.on("/api/color", handleColor);
+  server.on("/api/pixel", handlePixel);
+  server.on("/api/brightness", handleBrightness);
+  server.on("/api/effect", handleEffect);
+  server.on("/api/test", handleTest);
+  server.onNotFound(handleNotFound);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+  runEffectFrame();
+}

@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Short Circuit | LED Controller</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Anton&family=Poppins:wght@300;400;500;600&display=swap');
+
+  :root {
+    --sc-red: #eb1b26;
+    --sc-dark-red: #a40e16;
+    --bg-primary: #0a0a0a;
+    --bg-secondary: #141414;
+    --bg-tertiary: #1e1e1e;
+    --text-primary: #ffffff;
+    --text-secondary: #e0e0e0;
+    --text-muted: #999999;
+    --border-color: #333333;
+    --card-bg: #1a1a1a;
+    --card-border: #2a2a2a;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    font-family: 'Poppins', -apple-system, 'Segoe UI', sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    text-align: center;
+    margin: 0;
+    line-height: 1.7;
+  }
+
+  .sc-content { max-width: 480px; margin: 0 auto; padding: 32px 24px; }
+
+  .sc-header { display: flex; align-items: center; justify-content: center; gap: 14px; margin-bottom: 8px; }
+
+  .sc-wordmark {
+    font-family: 'Anton', Impact, 'Arial Narrow', sans-serif;
+    text-transform: uppercase;
+    font-size: 1.6em;
+    letter-spacing: 0.02em;
+  }
+
+  h1.sc-headline {
+    font-family: 'Anton', Impact, 'Arial Narrow', sans-serif;
+    text-transform: uppercase;
+    font-size: 1.1em;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin: 0 0 24px 0;
+  }
+
+  .sc-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 20px;
+    text-align: left;
+  }
+
+  .sc-card h2 {
+    font-weight: 300;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin: 0 0 16px 0;
+    text-align: center;
+  }
+
+  input[type=color] { width: 100%; height: 56px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-secondary); }
+  input[type=range] { width: 100%; accent-color: var(--sc-red); }
+  input[type=text] {
+    width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--border-color);
+    background: var(--bg-secondary); color: var(--text-primary); font-family: 'Poppins', sans-serif;
+  }
+
+  button {
+    font-family: 'Poppins', sans-serif;
+    font-weight: 500;
+    margin: 4px;
+    padding: 12px 18px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-size: 0.9em;
+    cursor: pointer;
+  }
+  button:active { background: var(--sc-dark-red); border-color: var(--sc-red); }
+  .sc-btn-row { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+  .sc-primary {
+    background: linear-gradient(90deg, var(--sc-dark-red), var(--sc-red));
+    border: none; width: 100%; padding: 14px; font-weight: 600;
+  }
+
+  .sc-status { font-size: 0.85em; color: var(--text-muted); text-align: center; }
+  .sc-status.ok span { color: #4caf50; font-weight: 600; }
+  .sc-status.fail span { color: var(--sc-red); font-weight: 600; }
+
+  #controls { display: none; }
+  #connectScreen { display: block; }
+</style>
+</head>
+<body>
+  <div class="sc-content">
+    <div class="sc-header">
+      <div class="sc-wordmark">SHORT CIRCUIT</div>
+    </div>
+    <h1 class="sc-headline">LED Controller</h1>
+
+    <!-- Connection / auto-detect screen -->
+    <div id="connectScreen" class="sc-card">
+      <h2>Connecting to device</h2>
+      <p class="sc-status" id="detectStatus">Looking for ledcontroller.local ...</p>
+      <div id="manualEntry" style="display:none; margin-top:12px;">
+        <label style="font-size:0.85em; color:var(--text-secondary);">Enter device IP or hostname manually</label>
+        <input type="text" id="manualHost" placeholder="e.g. 192.168.1.42 or ledcontroller.local" style="margin-top:8px;">
+        <button class="sc-primary" onclick="tryManualHost()" style="margin-top:10px;">Connect</button>
+      </div>
+    </div>
+
+    <!-- Main controls, shown once connected -->
+    <div id="controls">
+      <p class="sc-status ok" style="margin-bottom:16px;">
+        Connected to <span id="connectedHost"></span>
+        <button onclick="forgetHost()" style="margin-left:8px; padding:4px 10px; font-size:0.8em;">Change device</button>
+      </p>
+
+      <div class="sc-card">
+        <h2>Color</h2>
+        <input type="color" id="colorPicker" value="#ff0000">
+        <button class="sc-primary" onclick="sendColor()" style="margin-top:12px;">Apply Color</button>
+      </div>
+
+      <div class="sc-card">
+        <h2>Brightness</h2>
+        <input type="range" id="brightness" min="0" max="255" value="128" onchange="sendBrightness(this.value)">
+      </div>
+
+      <div class="sc-card">
+        <h2>Effects</h2>
+        <div class="sc-btn-row">
+          <button onclick="sendEffect('rainbow')">Rainbow</button>
+          <button onclick="sendEffect('chase')">Chase</button>
+          <button onclick="sendEffect('breathe')">Breathe</button>
+          <button onclick="sendEffect('off')">Off</button>
+        </div>
+      </div>
+
+      <div class="sc-card">
+        <h2>Test Pin — Connectivity Check</h2>
+        <div class="sc-btn-row">
+          <button onclick="sendTest('toggle')">Toggle Test LED</button>
+        </div>
+        <p class="sc-status">Pin state: <span id="testState">unknown</span></p>
+      </div>
+    </div>
+  </div>
+
+<script>
+// ---------------------------------------------------------------------
+// Device discovery: try the mDNS name first, remember whatever worked,
+// fall back to manual entry if nothing responds.
+//
+// IMPORTANT LIMITATION — mixed content:
+// If this page is served over HTTPS (most static hosts default to this),
+// browsers block a secure page from calling a plain HTTP local device.
+// This page must be served over plain HTTP for device calls to work
+// (e.g. disable forced HTTPS redirect on your host, or self-host via a
+// basic HTTP server). This is the same constraint local-device dashboards
+// like WLED's web app run into, for the same reason.
+// ---------------------------------------------------------------------
+
+const STORAGE_KEY = 'sc_led_device_host';
+const DEFAULT_HOST = 'ledcontroller.local';
+const DETECT_TIMEOUT_MS = 2500;
+
+let deviceHost = null;
+
+async function probeHost(host) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DETECT_TIMEOUT_MS);
+  try {
+    const res = await fetch(`http://${host}/api/status`, {
+      signal: controller.signal,
+      cache: 'no-store'
+    });
+    clearTimeout(timeout);
+    return res.ok;
+  } catch (e) {
+    clearTimeout(timeout);
+    return false;
+  }
+}
+
+async function autoDetect() {
+  const statusEl = document.getElementById('detectStatus');
+
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (saved) {
+    statusEl.textContent = `Reconnecting to ${saved} ...`;
+    if (await probeHost(saved)) {
+      connectTo(saved);
+      return;
+    }
+  }
+
+  statusEl.textContent = `Looking for ${DEFAULT_HOST} ...`;
+  if (await probeHost(DEFAULT_HOST)) {
+    connectTo(DEFAULT_HOST);
+    return;
+  }
+
+  statusEl.textContent = "Couldn't find the device automatically.";
+  document.getElementById('manualEntry').style.display = 'block';
+}
+
+function connectTo(host) {
+  deviceHost = host;
+  localStorage.setItem(STORAGE_KEY, host);
+  document.getElementById('connectedHost').textContent = host;
+  document.getElementById('connectScreen').style.display = 'none';
+  document.getElementById('controls').style.display = 'block';
+}
+
+async function tryManualHost() {
+  const input = document.getElementById('manualHost').value.trim();
+  if (!input) return;
+  const statusEl = document.getElementById('detectStatus');
+  statusEl.textContent = `Trying ${input} ...`;
+  if (await probeHost(input)) {
+    connectTo(input);
+  } else {
+    statusEl.textContent = `Couldn't reach ${input}. Check the address and try again.`;
+  }
+}
+
+function forgetHost() {
+  localStorage.removeItem(STORAGE_KEY);
+  deviceHost = null;
+  document.getElementById('controls').style.display = 'none';
+  document.getElementById('connectScreen').style.display = 'block';
+  document.getElementById('manualEntry').style.display = 'none';
+  document.getElementById('detectStatus').textContent = 'Looking for ledcontroller.local ...';
+  autoDetect();
+}
+
+// ---- API calls, all relative to the discovered deviceHost ----
+
+function hexToRgb(hex) {
+  const v = parseInt(hex.slice(1), 16);
+  return { r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255 };
+}
+function sendColor() {
+  const hex = document.getElementById('colorPicker').value;
+  const { r, g, b } = hexToRgb(hex);
+  fetch(`http://${deviceHost}/api/color?r=${r}&g=${g}&b=${b}`, { cache: 'no-store' });
+}
+function sendBrightness(v) {
+  fetch(`http://${deviceHost}/api/brightness?v=${v}`, { cache: 'no-store' });
+}
+function sendEffect(name) {
+  fetch(`http://${deviceHost}/api/effect?name=${name}`, { cache: 'no-store' });
+}
+function sendTest(state) {
+  fetch(`http://${deviceHost}/api/test?state=${state}&_=${Date.now()}`, { cache: 'no-store' })
+    .then(r => r.json())
+    .then(data => { document.getElementById('testState').textContent = data.testPin; })
+    .catch(() => { document.getElementById('testState').textContent = 'connection lost'; });
+}
+
+autoDetect();
+</script>
+</body>
+</html>
